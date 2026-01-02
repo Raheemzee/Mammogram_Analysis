@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mammogram CAD – CV-Based Detection</title>
+
+<style>
+body {
+  background: linear-gradient(135deg, #020617, #020617);
+  color: #e5e7eb;
+  font-family: system-ui, sans-serif;
+  margin: 0;
+}
+
+.container {
+  max-width: 1100px;
+  margin: auto;
+  padding: 40px;
+}
+
+h1 {
+  font-size: 2.4rem;
+  margin-bottom: 10px;
+}
+
+.subtitle {
+  color: #94a3b8;
+  margin-bottom: 30px;
+}
+
+.upload-box {
+  border: 2px dashed #38bdf8;
+  border-radius: 18px;
+  padding: 40px;
+  text-align: center;
+  cursor: pointer;
+  transition: 0.3s;
+}
+
+.upload-box:hover {
+  background: rgba(56,189,248,0.1);
+}
+
+button {
+  background: linear-gradient(135deg, #38bdf8, #0ea5e9);
+  border: none;
+  padding: 14px 26px;
+  border-radius: 14px;
+  font-size: 16px;
+  color: #020617;
+  cursor: pointer;
+  margin-top: 20px;
+}
+
+.gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 24px;
+  margin-top: 40px;
+}
+
+.card {
+  background: #020617;
+  border-radius: 18px;
+  padding: 12px;
+  box-shadow: 0 0 20px rgba(56,189,248,0.15);
+}
+
+img {
+  width: 100%;
+  border-radius: 12px;
+}
+</style>
+</head>
+
+<body>
+<div class="container">
+  <h1>🩺 Mammogram CAD System</h1>
+  <p class="subtitle">
+    Classical Computer Vision–based detection of suspicious dense regions.
+    <br>No AI models. No training. Fully explainable.
+  </p>
+
+  <input type="file" id="images" multiple hidden accept="image/*">
+
+  <div class="upload-box" onclick="document.getElementById('images').click()">
+    Click or Drag & Drop Mammograms
+  </div>
+
+  <button onclick="analyze()">Analyze Mammograms</button>
+
+  <div class="gallery" id="results"></div>
+</div>
+
+<script>
+async function analyze() {
+  const files = document.getElementById("images").files;
+  if (files.length === 0) return;
+
+  const formData = new FormData();
+  for (let f of files) {
+    formData.append("images", f);
+  }
+
+  const res = await fetch("/analyze", {
+    method: "POST",
+    body: formData
+  });
+
+  const data = await res.json();
+  const gallery = document.getElementById("results");
+  gallery.innerHTML = "";
+
+  data.forEach(item => {
+    const card = document.createElement("div");
+    card.className = "card";
+
+    const img = document.createElement("img");
+    img.src = item.output;
+
+    card.appendChild(img);
+    gallery.appendChild(card);
+  });
+}
+</script>
+
+</body>
+</html>
