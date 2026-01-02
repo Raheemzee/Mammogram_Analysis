@@ -1,125 +1,164 @@
-from flask import Flask, request, render_template
-from werkzeug.utils import secure_filename
 import os
+import uuid
 import cv2
 import numpy as np
+from flask import Flask, request, jsonify, send_from_directory, render_template
 
+# -----------------------------
+# App Configuration
+# -----------------------------
 app = Flask(__name__)
 
-# ------------------ Paths ------------------
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
-RESULT_FOLDER = os.path.join(BASE_DIR, "static", "results")
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+OUTPUT_DIR = os.path.join(BASE_DIR, "static", "outputs")
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(RESULT_FOLDER, exist_ok=True)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["RESULT_FOLDER"] = RESULT_FOLDER
-
-# ------------------ CV-ONLY MAMMOGRAM DETECTION ------------------
-
-def detect_suspicious_regions(image_path, filename):
+# -----------------------------
+# Utility: CV-based Detection
+# -----------------------------
+def detect_suspicious_regions(image_path):
     img = cv2.imread(image_path)
+    if img is None:
+        return None
+
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # Contrast enhancement
+    # CLAHE for local contrast enhancement
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
 
-    # Breast mask (remove background)
-    _, breast_mask = cv2.threshold(enhanced, 10, 255, cv2.THRESH_BINARY)
-    enhanced = cv2.bitwise_and(enhanced, enhanced, mask=breast_mask)
+    # Noise reduction
+    blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
 
-    # Detect dense (bright) regions
+    # Adaptive thresholding
     thresh = cv2.adaptiveThreshold(
-        enhanced,
-        255,
+        blurred, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY,
-        51,
-        -10
+        41, 3
     )
 
     # Morphological cleanup
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    clean = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-    clean = cv2.morphologyEx(clean, cv2.MORPH_OPEN, kernel)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
 
     contours, _ = cv2.findContours(
-        clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
 
-    suspicious_count = 0
+    candidates = []
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < 600:
+        if area < 800 or area > 15000:
             continue
 
-        perimeter = cv2.arcLength(cnt, True)
-        circularity = (4 * np.pi * area) / (perimeter ** 2 + 1e-6)
-
-        # Filter unlikely shapes
-        if circularity < 0.15 or circularity > 0.85:
-            continue
-
-        suspicious_count += 1
         x, y, w, h = cv2.boundingRect(cnt)
+        aspect_ratio = w / float(h)
 
-        cv2.rectangle(img, (x, y), (x+w, y+h), (0, 215, 255), 2)
+        # Reject elongated ducts/vessels
+        if aspect_ratio > 2.5 or aspect_ratio < 0.4:
+            continue
+
+        # Create mask
+        mask = np.zeros(gray.shape, dtype=np.uint8)
+        cv2.drawContours(mask, [cnt], -1, 255, -1)
+
+        region_pixels = gray[mask == 255]
+
+        # Texture (variance)
+        variance = np.var(region_pixels)
+        if variance < 150:
+            continue
+
+        # Local contrast
+        dilated = cv2.dilate(mask, None, iterations=5)
+        neighborhood = gray[(dilated == 255) & (mask == 0)]
+        if len(neighborhood) == 0:
+            continue
+
+        contrast = np.mean(region_pixels) - np.mean(neighborhood)
+        if contrast < 12:
+            continue
+
+        # Suspicion score
+        score = (contrast * 0.6) + (variance * 0.4)
+
+        candidates.append({
+            "cnt": cnt,
+            "score": score
+        })
+
+    # Keep only TOP suspicious regions
+    candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)[:3]
+
+    # Draw results
+    for c in candidates:
+        x, y, w, h = cv2.boundingRect(c["cnt"])
+        cv2.rectangle(img, (x, y), (x + w, y + h), (0, 215, 255), 2)
         cv2.putText(
-            img,
-            "Suspicious",
-            (x, y - 6),
+            img, "Suspicious",
+            (x, y - 8),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
+            0.5,
             (0, 215, 255),
             1
         )
 
-    result_path = os.path.join(app.config["RESULT_FOLDER"], filename)
-    cv2.imwrite(result_path, img)
+    return img
 
-    return suspicious_count, f"/static/results/{filename}"
+# -----------------------------
+# Routes
+# -----------------------------
+@app.route("/")
+def index():
+    return render_template("index.html")
 
-# ------------------ ROUTES ------------------
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    if "images" not in request.files:
+        return jsonify([])
 
-@app.route("/", methods=["GET", "POST"])
-def upload_files():
+    files = request.files.getlist("images")
     results = []
 
-    if request.method == "POST":
-        uploaded_files = request.files.getlist("files")
+    for file in files:
+        if file.filename == "":
+            continue
 
-        for file in uploaded_files:
-            if not file:
-                continue
+        ext = os.path.splitext(file.filename)[1]
+        filename = f"{uuid.uuid4().hex}{ext}"
+        upload_path = os.path.join(UPLOAD_DIR, filename)
 
-            filename = secure_filename(file.filename)
-            upload_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-            file.save(upload_path)
+        file.save(upload_path)
 
-            count, processed_image_url = detect_suspicious_regions(
-                upload_path, filename
-            )
+        processed = detect_suspicious_regions(upload_path)
+        if processed is None:
+            continue
 
-            results.append({
-                "filename": filename,
-                "regions": count,
-                "processed_image": processed_image_url,
-                "risk": (
-                    "High" if count >= 5 else
-                    "Moderate" if count >= 2 else
-                    "Low"
-                )
-            })
+        output_name = f"out_{filename}"
+        output_path = os.path.join(OUTPUT_DIR, output_name)
+        cv2.imwrite(output_path, processed)
 
-    return render_template("index.html", results=results)
+        results.append({
+            "output": f"/static/outputs/{output_name}"
+        })
 
-# ------------------ Run ------------------
+    return jsonify(results)
 
+# -----------------------------
+# Static Files (Render-safe)
+# -----------------------------
+@app.route("/static/outputs/<path:filename>")
+def serve_output(filename):
+    return send_from_directory(OUTPUT_DIR, filename)
+
+# -----------------------------
+# Run
+# -----------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
